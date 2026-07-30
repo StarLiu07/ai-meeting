@@ -6,11 +6,11 @@ function apiProxy() {
     name: 'ai-meeting-api-proxy',
     configureServer(server) {
       const env = loadEnv(server.config.mode, process.cwd(), '')
-      const baseUrl = env.AI_MEETING_BASE_URL || 'https://downstream.jbbtoken.cn/v1'
-      const apiKey = env.AI_MEETING_API_KEY
 
       server.middlewares.use('/api', async (request, response) => {
         response.setHeader('Content-Type', 'application/json; charset=utf-8')
+        const baseUrl = request.headers['x-api-base-url'] || env.AI_MEETING_BASE_URL || 'https://downstream.jbbtoken.cn/v1'
+        const apiKey = request.headers['x-api-key'] || env.AI_MEETING_API_KEY
         if (!apiKey) {
           response.statusCode = 503
           response.end(JSON.stringify({ error: '缺少 AI_MEETING_API_KEY。请在 .env.local 中配置 API Key。' }))

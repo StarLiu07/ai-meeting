@@ -21,10 +21,12 @@ import {
   Scale,
   SearchCheck,
   Send,
+  Settings,
   ShieldAlert,
   Sparkles,
   Target,
   Users,
+  Wrench,
   X,
   LoaderCircle,
 } from 'lucide-react'
@@ -91,6 +93,11 @@ const initialForm = {
   constraints: '两个月内验证；首期预算不超过 10 万元；涉及退款的操作必须由人工确认。',
 }
 
+const initialApiConfig = {
+  baseUrl: '',
+  apiKey: '',
+}
+
 function Logo() {
   return (
     <div className="brand" aria-label="圆桌">
@@ -101,10 +108,17 @@ function Logo() {
   )
 }
 
-async function requestModel(model, system, prompt) {
+function getApiHeaders(apiConfig) {
+  const headers = { 'Content-Type': 'application/json' }
+  if (apiConfig.baseUrl) headers['x-api-base-url'] = apiConfig.baseUrl
+  if (apiConfig.apiKey) headers['x-api-key'] = apiConfig.apiKey
+  return headers
+}
+
+async function requestModel(model, system, prompt, apiConfig = {}) {
   const response = await fetch('/api/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getApiHeaders(apiConfig),
     body: JSON.stringify({
       model,
       messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
@@ -134,12 +148,74 @@ function MarkdownContent({ children, className = '' }) {
   )
 }
 
-async function askRole(role, system, prompt) {
+async function askRole(role, system, prompt, apiConfig = {}) {
   try {
-    return await requestModel(role.modelId, system, prompt)
+    return await requestModel(role.modelId, system, prompt, apiConfig)
   } catch (error) {
     return `本轮没有成功提交：${error.message}。这不是会议结论，主持人可以选择忽略这一席或稍后重试。`
   }
+}
+
+function SettingsModal({ config, onSave, onClose, onTest, testStatus }) {
+  const [draft, setDraft] = useState({ ...config })
+
+  function handleSave() {
+    onSave({ ...draft })
+  }
+
+  function handleTest() {
+    onTest({ ...draft })
+  }
+
+  return (
+    <div className="settings-backdrop" onClick={onClose}>
+      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-head">
+          <h2><Settings size={18} /> API 提供商设置</h2>
+          <button className="settings-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+        </div>
+        <p className="settings-desc">
+          在这里配置你自己的 API 提供商。留空则使用服务器默认配置（.env.local）。
+        </p>
+        <div className="settings-body">
+          <label className="settings-field">
+            <span>API Base URL</span>
+            <input
+              type="text"
+              value={draft.baseUrl}
+              onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
+              placeholder="https://api.openai.com/v1"
+            />
+            <small>例如 https://api.openai.com/v1，必须兼容 OpenAI Chat Completions 接口</small>
+          </label>
+          <label className="settings-field">
+            <span>API Key</span>
+            <input
+              type="password"
+              value={draft.apiKey}
+              onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
+              placeholder="sk-..."
+              autoComplete="off"
+            />
+            <small>密钥仅保存在浏览器本地，不会上传到服务器</small>
+          </label>
+          {testStatus && (
+            <div className={`settings-status ${testStatus.ok ? 'settings-status-ok' : 'settings-status-err'}`}>
+              {testStatus.ok ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+              <span>{testStatus.message}</span>
+            </div>
+          )}
+        </div>
+        <div className="settings-actions">
+          <button className="settings-btn secondary" onClick={onClose}>取消</button>
+          <button className="settings-btn secondary" onClick={handleTest} disabled={!draft.baseUrl && !draft.apiKey}>
+            测试连接
+          </button>
+          <button className="settings-btn primary" onClick={handleSave}>保存配置</button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function App() {
@@ -153,29 +229,66 @@ function App() {
   const [isThinking, setIsThinking] = useState(false)
   const [meetingError, setMeetingError] = useState('')
   const [summary, setSummary] = useState('')
+  const [apiConfig, setApiConfig] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai-meeting-api-config')
+      return saved ? JSON.parse(saved) : { ...initialApiConfig }
+    } catch {
+      return { ...initialApiConfig }
+    }
+  })
+  const [showSettings, setShowSettings] = useState(false)
+  const [roleModels, setRoleModels] = useState({})
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
+  const [testStatus, setTestStatus] = useState(null)
 
   const selectedRoles = roles.filter((role) => selected.includes(role.id))
-  const activeRoles = selectedRoles.map((role, index) => ({
+
+  const activeRoles = selectedRoles.map((role) => ({
     ...role,
-    modelId: models.includes(role.modelId) ? role.modelId : models[index] || role.modelId,
+    modelId: roleModels[role.id] || models[0] || role.modelId,
   }))
 
-  useEffect(() => {
-    fetch('/api/models')
+  function defaultAssignModels(availableModels, currentSelected, currentRoleModels) {
+    if (!availableModels.length) return currentRoleModels
+    const next = { ...currentRoleModels }
+    for (const roleId of currentSelected) {
+      if (!next[roleId] || !availableModels.includes(next[roleId])) {
+        next[roleId] = availableModels[0]
+      }
+    }
+    return next
+  }
+
+  function fetchModels(config = apiConfig) {
+    const headers = {}
+    if (config.baseUrl) headers['x-api-base-url'] = config.baseUrl
+    if (config.apiKey) headers['x-api-key'] = config.apiKey
+
+    setApiStatus('loading')
+    fetch('/api/models', { headers })
       .then(async (response) => {
         const payload = await response.json()
         if (!response.ok) throw new Error(payload.error || '无法连接模型服务')
         return payload.data || []
       })
       .then((items) => {
-        setModels(items.map((item) => item.id))
+        const ids = items.map((item) => item.id)
+        setModels(ids)
+        setRoleModels((prev) => defaultAssignModels(ids, selected, prev))
         setApiStatus('ready')
+        setMeetingError('')
       })
       .catch((error) => {
         setApiStatus('error')
         setMeetingError(error.message)
       })
-  }, [])
+  }
+
+  useEffect(() => {
+    fetchModels(apiConfig)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiConfig, refreshTrigger])
 
   function updateField(event) {
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }))
@@ -188,6 +301,16 @@ function App() {
       }
       return current.length < 5 ? [...current, id] : current
     })
+    setRoleModels((prev) => {
+      if (!prev[id] && models.length > 0) {
+        return { ...prev, [id]: models[0] }
+      }
+      return prev
+    })
+  }
+
+  function updateRoleModel(roleId, modelId) {
+    setRoleModels((prev) => ({ ...prev, [roleId]: modelId }))
   }
 
   async function startMeeting(event) {
@@ -203,7 +326,7 @@ function App() {
       const prompt = `会议议题：${form.topic}\n决策目标：${form.goal}\n必要背景：${form.context}\n限制条件：${form.constraints}\n\n请先独立分析这个议题，不要假装已经看过其他参与者的意见。给出你的初步立场、两条关键依据，并提出一个你希望会议主持人（用户）回答的问题。控制在 250 字以内。`
       const opening = await Promise.all(activeRoles.map(async (role) => ({
         type: 'ai', roleId: role.id, author: role.name, model: role.modelId,
-        content: await askRole(role, `你是 AI 会议中的“${role.name}”。你的职责是${role.description}。你必须清楚区分事实、推测和价值判断，不要替用户做最终决定。`, prompt),
+        content: await askRole(role, `你是 AI 会议中的"${role.name}"。你的职责是${role.description}。你必须清楚区分事实、推测和价值判断，不要替用户做最终决定。`, prompt, apiConfig),
       })))
       setMessages(opening)
     } catch (error) {
@@ -225,7 +348,7 @@ function App() {
       const transcript = transcriptText(nextMessages)
       const replies = await Promise.all(activeRoles.map(async (role) => ({
         type: 'ai', roleId: role.id, author: role.name, model: role.modelId,
-        content: await askRole(role, `你是 AI 会议中的“${role.name}”。刚才用户已经发言。请直接回应用户的观点，指出你同意或不同意的地方，补充一个具体问题或反例。不要替主持人下结论。控制在 220 字以内。`, `原始议题：${form.topic}\n当前会议记录：\n${transcript}`),
+        content: await askRole(role, `你是 AI 会议中的"${role.name}"。刚才用户已经发言。请直接回应用户的观点，指出你同意或不同意的地方，补充一个具体问题或反例。不要替主持人下结论。控制在 220 字以内。`, `原始议题：${form.topic}\n当前会议记录：\n${transcript}`, apiConfig),
       })))
       setMessages([...nextMessages, ...replies])
     } catch (error) {
@@ -241,7 +364,7 @@ function App() {
     setIsThinking(true)
     try {
       const moderator = models.includes('gpt-5.6-sol') ? 'gpt-5.6-sol' : models.includes('gpt-5.4-mini') ? 'gpt-5.4-mini' : models[0]
-      const result = await requestModel(moderator, '你是会议主持人。你的任务是把讨论整理成可供人类决定的阶段纪要，不要把共识伪装成事实，也不要替用户做最终决定。', `议题：${form.topic}\n目标：${form.goal}\n限制：${form.constraints}\n\n完整讨论记录：\n${transcriptText(messages)}\n\n请用中文输出：1. 当前最有力的方案 2. 支持依据 3. 仍然存在的分歧 4. 主要风险 5. 需要用户在下一轮决定的问题。不要超过 600 字。`)
+      const result = await requestModel(moderator, '你是会议主持人。你的任务是把讨论整理成可供人类决定的阶段纪要，不要把共识伪装成事实，也不要替用户做最终决定。', `议题：${form.topic}\n目标：${form.goal}\n限制：${form.constraints}\n\n完整讨论记录：\n${transcriptText(messages)}\n\n请用中文输出：1. 当前最有力的方案 2. 支持依据 3. 仍然存在的分歧 4. 主要风险 5. 需要用户在下一轮决定的问题。不要超过 600 字。`, apiConfig)
       setSummary(result)
       setView('result')
     } catch (error) {
@@ -251,8 +374,39 @@ function App() {
     }
   }
 
+  function handleSaveConfig(newConfig) {
+    setApiConfig(newConfig)
+    localStorage.setItem('ai-meeting-api-config', JSON.stringify(newConfig))
+    setShowSettings(false)
+  }
+
+  async function handleTestConnection(draftConfig) {
+    setTestStatus(null)
+    try {
+      const headers = {}
+      if (draftConfig.baseUrl) headers['x-api-base-url'] = draftConfig.baseUrl
+      if (draftConfig.apiKey) headers['x-api-key'] = draftConfig.apiKey
+      const response = await fetch('/api/models', { headers })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || '连接失败')
+      const count = (payload.data || []).length
+      setTestStatus({ ok: true, message: `连接成功，发现 ${count} 个可用模型` })
+    } catch (error) {
+      setTestStatus({ ok: false, message: error.message })
+    }
+  }
+
   return (
     <div className="app-shell">
+      {showSettings && (
+        <SettingsModal
+          config={apiConfig}
+          onSave={handleSaveConfig}
+          onClose={() => { setShowSettings(false); setTestStatus(null) }}
+          onTest={handleTestConnection}
+          testStatus={testStatus}
+        />
+      )}
       <header className="topbar">
         <Logo />
         <nav className={mobileNav ? 'main-nav is-open' : 'main-nav'} aria-label="主导航">
@@ -264,6 +418,9 @@ function App() {
           </button>
         </nav>
         <div className="top-actions">
+          <button className="icon-button" aria-label="API 设置" title="API 提供商设置" onClick={() => setShowSettings(true)}>
+            <Settings size={19} />
+          </button>
           <button className="icon-button" aria-label="帮助" title="帮助"><CircleHelp size={19} /></button>
           <button className="avatar" aria-label="个人账户">S</button>
           <button className="menu-button" aria-label="打开导航" onClick={() => setMobileNav((value) => !value)}>
@@ -282,6 +439,8 @@ function App() {
             startMeeting={startMeeting}
             apiStatus={apiStatus}
             models={models}
+            roleModels={roleModels}
+            updateRoleModel={updateRoleModel}
           />
         )}
         {view === 'meeting' && (
@@ -306,7 +465,7 @@ function App() {
   )
 }
 
-function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiStatus, models }) {
+function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiStatus, models, roleModels, updateRoleModel }) {
   const canStart = form.topic.trim().length > 0 && selected.length >= 3 && apiStatus === 'ready'
   return (
     <div className="setup-page page-enter">
@@ -352,24 +511,39 @@ function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiS
         <aside className="roles-panel">
           <div className="panel-heading compact">
             <span className="step-number">02</span>
-            <div><h2>组建议事席</h2><p>选择 3–5 个互补角色，讨论会围绕你的发言推进。</p></div>
+            <div><h2>组建议事席</h2><p>选择 3–5 个互补角色，并为每位指定模型。</p></div>
           </div>
           <div className="role-list">
             {roles.map((role) => {
               const Icon = role.icon
               const active = selected.includes(role.id)
               return (
-                <button
-                  type="button"
-                  key={role.id}
-                  className={active ? 'role-option selected' : 'role-option'}
-                  onClick={() => toggleRole(role.id)}
-                  aria-pressed={active}
-                >
-                  <span className="role-icon" style={{ '--role-color': role.color }}><Icon size={18} /></span>
-                  <span className="role-copy"><strong>{role.name}</strong><small>{role.description}</small></span>
-                  <span className="role-check">{active && <Check size={14} strokeWidth={3} />}</span>
-                </button>
+                <div key={role.id} className={active ? 'role-wrapper selected' : 'role-wrapper'}>
+                  <button
+                    type="button"
+                    className="role-option"
+                    onClick={() => toggleRole(role.id)}
+                    aria-pressed={active}
+                  >
+                    <span className="role-icon" style={{ '--role-color': role.color }}><Icon size={18} /></span>
+                    <span className="role-copy"><strong>{role.name}</strong><small>{role.description}</small></span>
+                    <span className="role-check">{active && <Check size={14} strokeWidth={3} />}</span>
+                  </button>
+                  {active && models.length > 0 && (
+                    <div className="role-model-pick">
+                      <Wrench size={11} />
+                      <select
+                        value={roleModels[role.id] || models[0]}
+                        onChange={(e) => updateRoleModel(role.id, e.target.value)}
+                        className="model-select"
+                      >
+                        {models.map((m) => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
               )
             })}
           </div>
@@ -381,7 +555,7 @@ function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiS
             开始会议 <ArrowRight size={18} />
           </button>
           <p className={apiStatus === 'error' ? 'privacy-line api-error' : 'privacy-line'}>
-            {apiStatus === 'ready' ? <><CheckCircle2 size={14} /> API 已连接，会议会等待你的每次发言</> : apiStatus === 'loading' ? <><LoaderCircle size={14} className="spin" /> 正在连接模型服务</> : <><AlertTriangle size={14} /> {`模型服务未连接：${apiStatus === 'error' ? '请检查 .env.local' : ''}`}</>}
+            {apiStatus === 'ready' ? <><CheckCircle2 size={14} /> API 已连接，会议会等待你的每次发言</> : apiStatus === 'loading' ? <><LoaderCircle size={14} className="spin" /> 正在连接模型服务</> : <><AlertTriangle size={14} /> {`模型服务未连接：${apiStatus === 'error' ? '请检查 .env.local 或 API 设置' : ''}`}</>}
           </p>
         </aside>
       </form>
@@ -576,7 +750,7 @@ function ResultView({ form, roles: activeRoles, onBack }) {
         <aside className="result-sidebar">
           <section className="consensus-panel">
             <div className="section-label"><Users size={18} /> 共识与分歧</div>
-            <div className="consensus-item agree"><strong><Check size={16} /> 核心共识</strong><p>所有参与者均反对一次性全量上线，并认可“低风险查询先行”。</p></div>
+            <div className="consensus-item agree"><strong><Check size={16} /> 核心共识</strong><p>所有参与者均反对一次性全量上线，并认可"低风险查询先行"。</p></div>
             <div className="consensus-item disagree"><strong><Scale size={16} /> 关键分歧</strong><p>方案提出者主张首期覆盖 3 类场景；风险审查员建议只做 2 类，以降低知识库遗漏风险。</p></div>
           </section>
           <section className="risk-panel">
