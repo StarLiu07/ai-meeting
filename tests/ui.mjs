@@ -30,7 +30,7 @@ try {
   await desktop.getByText('讨论现场', { exact: true }).waitFor()
   await desktop.getByPlaceholder('我想补充…… / 我不同意…… / 请解释……').fill('我最担心的是试点期间的错误回答会直接影响客户信任，请先明确人工接管的触发条件。')
   await desktop.getByRole('button', { name: /发言并继续/ }).click()
-  await desktop.getByText('回应你的发言', { exact: true }).first().waitFor({ timeout: 120000 })
+  await desktop.getByText('公开质询', { exact: true }).first().waitFor({ timeout: 120000 })
   await desktop.getByRole('button', { name: /形成阶段纪要/ }).click()
   await desktop.getByText('主持人纪要', { exact: true }).waitFor({ timeout: 120000 })
   await desktop.waitForFunction(() => getComputedStyle(document.querySelector('.live-summary')).opacity === '1')

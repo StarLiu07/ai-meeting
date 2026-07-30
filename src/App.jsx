@@ -80,8 +80,8 @@ const roles = [
 ]
 
 const phases = [
-  { label: '独立分析', detail: '参与者互不可见', icon: Bot },
-  { label: '交叉质询', detail: '检查假设与证据', icon: MessageSquareWarning },
+  { label: '独立分析', detail: '首轮互不可见', icon: Bot },
+  { label: '交叉质询', detail: '公开观点并相互审阅', icon: MessageSquareWarning },
   { label: '立场修订', detail: '记录观点变化', icon: History },
   { label: '主持决议', detail: '汇总共识与分歧', icon: Scale },
 ]
@@ -325,7 +325,7 @@ function App() {
     try {
       const prompt = `会议议题：${form.topic}\n决策目标：${form.goal}\n必要背景：${form.context}\n限制条件：${form.constraints}\n\n请先独立分析这个议题，不要假装已经看过其他参与者的意见。给出你的初步立场、两条关键依据，并提出一个你希望会议主持人（用户）回答的问题。控制在 250 字以内。`
       const opening = await Promise.all(activeRoles.map(async (role) => ({
-        type: 'ai', roleId: role.id, author: role.name, model: role.modelId,
+        type: 'ai', stage: 'opening', roleId: role.id, author: role.name, model: role.modelId,
         content: await askRole(role, `你是 AI 会议中的"${role.name}"。你的职责是${role.description}。你必须清楚区分事实、推测和价值判断，不要替用户做最终决定。`, prompt, apiConfig),
       })))
       setMessages(opening)
@@ -339,7 +339,7 @@ function App() {
   async function submitContribution(content) {
     const clean = content.trim()
     if (!clean || isThinking) return
-    const userMessage = { type: 'user', author: '你', content: clean }
+    const userMessage = { type: 'user', stage: 'user', author: '你', content: clean }
     const nextMessages = [...messages, userMessage]
     setMessages(nextMessages)
     setMeetingError('')
@@ -347,8 +347,8 @@ function App() {
     try {
       const transcript = transcriptText(nextMessages)
       const replies = await Promise.all(activeRoles.map(async (role) => ({
-        type: 'ai', roleId: role.id, author: role.name, model: role.modelId,
-        content: await askRole(role, `你是 AI 会议中的"${role.name}"。刚才用户已经发言。请直接回应用户的观点，指出你同意或不同意的地方，补充一个具体问题或反例。不要替主持人下结论。控制在 220 字以内。`, `原始议题：${form.topic}\n当前会议记录：\n${transcript}`, apiConfig),
+        type: 'ai', stage: 'cross-examination', roleId: role.id, author: role.name, model: role.modelId,
+        content: await askRole(role, `你是 AI 会议中的"${role.name}"，职责是${role.description}。独立开场已经锁定，现在进入公开交叉质询：你能看到此前的完整会议记录，但看不到其他席位正在生成的本轮回答。请同时完成三件事：1. 直接回应主持人刚才的发言；2. 点名审阅至少一个其他议事席的具体观点，说明你支持、质疑或补充什么以及理由；3. 说明你的初始立场是否改变及原因。不要机械赞同，也不要为了反对而反对；不要替主持人下结论。控制在 300 字以内。`, `原始议题：${form.topic}\n此前完整会议记录：\n${transcript}`, apiConfig),
       })))
       setMessages([...nextMessages, ...replies])
     } catch (error) {
@@ -364,7 +364,7 @@ function App() {
     setIsThinking(true)
     try {
       const moderator = models.includes('gpt-5.6-sol') ? 'gpt-5.6-sol' : models.includes('gpt-5.4-mini') ? 'gpt-5.4-mini' : models[0]
-      const result = await requestModel(moderator, '你是会议主持人。你的任务是把讨论整理成可供人类决定的阶段纪要，不要把共识伪装成事实，也不要替用户做最终决定。', `议题：${form.topic}\n目标：${form.goal}\n限制：${form.constraints}\n\n完整讨论记录：\n${transcriptText(messages)}\n\n请用中文输出：1. 当前最有力的方案 2. 支持依据 3. 仍然存在的分歧 4. 主要风险 5. 需要用户在下一轮决定的问题。不要超过 600 字。`, apiConfig)
+      const result = await requestModel(moderator, '你是会议主持人。你的任务是把讨论整理成可供人类决定的阶段纪要，不要把共识伪装成事实，也不要替用户做最终决定。', `议题：${form.topic}\n目标：${form.goal}\n限制：${form.constraints}\n\n完整讨论记录：\n${transcriptText(messages)}\n\n请用中文输出：1. 当前最有力的方案 2. 支持依据 3. 仍然存在的分歧 4. 主要风险 5. 各席位明确表达的立场变化及原因 6. 需要用户在下一轮决定的问题。不要超过 600 字。`, apiConfig)
       setSummary(result)
       setView('result')
     } catch (error) {
@@ -585,14 +585,14 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
       <section className="room-heading">
         <span className="section-kicker">OPEN FLOOR · ROUND {hasUserTurn ? '02' : '01'}</span>
         <h1>{form.topic}</h1>
-        <p>AI 已经提交初步判断。读完后，在下方写下你的事实、疑问或反对意见，下一轮回应会围绕你的发言展开。</p>
+        <p>AI 已经分别提交并锁定初步判断。读完后写下你的事实、疑问或反对意见；下一轮将公开这些观点，由各席位回应你并相互质询。</p>
       </section>
 
       <div className="room-layout">
         <section className="discussion-feed">
           <div className="feed-header"><div><strong>讨论现场</strong><span>{messages.length} 条发言</span></div><span className="feed-lock"><CheckCircle2 size={14} /> 独立分析已完成</span></div>
           {messages.length === 0 && isThinking && (
-            <div className="thinking-state"><LoaderCircle size={23} className="spin" /><strong>议事席正在准备各自的开场观点</strong><span>他们不会看到彼此的回答</span></div>
+            <div className="thinking-state"><LoaderCircle size={23} className="spin" /><strong>议事席正在准备各自的开场观点</strong><span>仅本轮互不可见，提交后将同时公开</span></div>
           )}
           {messages.map((message, index) => {
             const role = activeRoles.find((item) => item.id === message.roleId)
@@ -601,13 +601,13 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
               <article className={message.type === 'user' ? 'speech user-speech' : 'speech'} key={`${message.author}-${index}`}>
                 <div className="speech-avatar" style={{ '--role-color': role?.color || '#172027' }}>{message.type === 'user' ? '你' : <Icon size={17} />}</div>
                 <div className="speech-body">
-                  <div className="speech-byline"><strong>{message.author}</strong>{message.model && <span>{message.model}</span>}<small>{message.type === 'user' ? '主持人发言' : index < activeRoles.length ? '独立开场' : '回应你的发言'}</small></div>
+                  <div className="speech-byline"><strong>{message.author}</strong>{message.model && <span>{message.model}</span>}<small>{message.type === 'user' ? '主持人发言' : message.stage === 'opening' ? '独立开场' : '公开质询'}</small></div>
                   <MarkdownContent>{message.content}</MarkdownContent>
                 </div>
               </article>
             )
           })}
-          {isThinking && messages.length > 0 && <div className="replying-state"><LoaderCircle size={17} className="spin" /> AI 正在回应你的发言…</div>}
+          {isThinking && messages.length > 0 && <div className="replying-state"><LoaderCircle size={17} className="spin" /> AI 正在回应你并交叉审阅其他观点…</div>}
         </section>
 
         <aside className="room-sidebar">
@@ -645,7 +645,7 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
       </div>
 
       <section className="human-turn">
-        <div className="turn-label"><span className="turn-marker">你</span><div><strong>轮到你了</strong><span>写完后，AI 会分别回应你的发言</span></div></div>
+        <div className="turn-label"><span className="turn-marker">你</span><div><strong>轮到你了</strong><span>写完后，AI 会看到此前记录，分别回应你并相互质询</span></div></div>
         <form onSubmit={submit}>
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="我想补充…… / 我不同意…… / 请解释……" rows="3" disabled={isThinking} />
           <div className="composer-footer"><span>{draft.length}/800</span><button className="send-button" type="submit" disabled={!draft.trim() || isThinking}>发言并继续 <Send size={16} /></button></div>
@@ -678,7 +678,7 @@ function MeetingView({ form, roles: activeRoles, phase, onSkip }) {
         <span className="live-dot" /> 会议进行中 <span>YR-0726-018</span>
       </div>
       <h1>{form.topic}</h1>
-      <p>各议事席正在按标准协议工作。独立分析阶段互不可见。</p>
+      <p>各议事席仅在独立分析阶段互不可见；初始观点锁定后将公开并进入交叉质询。</p>
 
       <section className="deliberation-track" aria-label="会议进度">
         <div className="track-line"><span style={{ width: `${(phase / (phases.length - 1)) * 100}%` }} /></div>
@@ -698,7 +698,7 @@ function MeetingView({ form, roles: activeRoles, phase, onSkip }) {
       <section className="participant-board">
         <div className="board-heading">
           <div><span className="section-kicker">DELIBERATION FLOOR</span><h2>{phases[phase].label}</h2></div>
-          <span className="secure-state"><span /> 隔离工作区</span>
+          <span className="secure-state"><span /> {phase === 0 ? '首轮隔离' : '观点已公开'}</span>
         </div>
         <div className="participant-grid">
           {activeRoles.map((role, index) => {
