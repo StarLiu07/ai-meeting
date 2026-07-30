@@ -1,0 +1,24 @@
+{
+  "name": "ai-meeting-room",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:ui": "node tests/ui.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.0"
+  }
+}
