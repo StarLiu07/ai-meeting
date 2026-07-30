@@ -447,9 +447,11 @@ function App() {
           <InteractiveMeetingView
             form={form}
             roles={activeRoles}
+            models={models}
             messages={messages}
             isThinking={isThinking}
             error={meetingError}
+            onModelChange={updateRoleModel}
             onSend={submitContribution}
             onFinish={finishMeeting}
           />
@@ -563,7 +565,7 @@ function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiS
   )
 }
 
-function InteractiveMeetingView({ form, roles: activeRoles, messages, isThinking, error, onSend, onFinish }) {
+function InteractiveMeetingView({ form, roles: activeRoles, models, messages, isThinking, error, onModelChange, onSend, onFinish }) {
   const [draft, setDraft] = useState('')
   const hasUserTurn = messages.some((message) => message.type === 'user')
 
@@ -615,8 +617,29 @@ function InteractiveMeetingView({ form, roles: activeRoles, messages, isThinking
             <p>你可以补充现场事实、质疑某个假设，或要求某位议事席展开。没有你的发言，会议不会进入下一轮。</p>
           </div>
           <div className="room-card participant-list">
-            <div className="room-card-label"><span className="section-kicker">AT THE TABLE</span><span>{activeRoles.length} 位</span></div>
-            {activeRoles.map((role) => { const Icon = role.icon; return <div className="table-member" key={role.id}><span className="role-icon" style={{ '--role-color': role.color }}><Icon size={15} /></span><span><strong>{role.name}</strong><small>{role.modelId}</small></span><i /></div> })}
+            <div className="room-card-label"><span className="section-kicker">AT THE TABLE</span><span><Wrench size={11} /> 可调整模型</span></div>
+            {activeRoles.map((role) => {
+              const Icon = role.icon
+              return (
+                <div className="table-member" key={role.id}>
+                  <span className="role-icon" style={{ '--role-color': role.color }}><Icon size={15} /></span>
+                  <label className="table-member-config">
+                    <strong>{role.name}</strong>
+                    <select
+                      value={role.modelId}
+                      onChange={(event) => onModelChange(role.id, event.target.value)}
+                      disabled={isThinking}
+                      aria-label={`修改${role.name}使用的模型`}
+                      title={isThinking ? '本轮响应完成后可切换模型' : `修改${role.name}后续使用的模型`}
+                    >
+                      {models.map((model) => <option key={model} value={model}>{model}</option>)}
+                    </select>
+                  </label>
+                  <i />
+                </div>
+              )
+            })}
+            <p className="model-change-note">切换后从下一轮发言生效，已有记录仍保留原模型。</p>
           </div>
         </aside>
       </div>
