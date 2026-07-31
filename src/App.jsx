@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -288,6 +288,11 @@ function App() {
   const [testStatus, setTestStatus] = useState(null)
   const [savedMeetings, setSavedMeetings] = useState(loadSavedMeetings)
   const [currentMeetingId, setCurrentMeetingId] = useState(null)
+  const currentMeetingRef = useRef(null)
+
+  useEffect(() => {
+    currentMeetingRef.current = currentMeetingId
+  }, [currentMeetingId])
 
   const selectedRoles = roles.filter((role) => selected.includes(role.id))
 
@@ -342,7 +347,7 @@ function App() {
   }, [apiConfig, refreshTrigger])
 
   useEffect(() => {
-    if (!currentMeetingId || (view !== 'meeting' && view !== 'result')) return
+    if (!currentMeetingId) return
 
     setSavedMeetings((current) => {
       const existing = current.find((meeting) => meeting.id === currentMeetingId)
@@ -399,9 +404,10 @@ function App() {
   async function startMeeting(event) {
     event.preventDefault()
     if (!form.topic.trim()) return
+    const meetingId = createMeetingId()
     setMessages([])
     setSummary('')
-    setCurrentMeetingId(createMeetingId())
+    setCurrentMeetingId(meetingId)
     setMeetingError('')
     setView('meeting')
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -412,11 +418,15 @@ function App() {
         type: 'ai', stage: 'opening', roleId: role.id, author: role.name, model: role.modelId,
         content: await askRole(role, `你是 AI 会议中的"${role.name}"。你的职责是${role.description}。你必须清楚区分事实、推测和价值判断，不要替用户做最终决定。`, prompt, apiConfig),
       })))
-      setMessages(opening)
+      if (currentMeetingRef.current === meetingId) {
+        setMessages(opening)
+      } else {
+        appendMeetingMessages(meetingId, opening)
+      }
     } catch (error) {
-      setMeetingError(error.message)
+      if (currentMeetingRef.current === meetingId) setMeetingError(error.message)
     } finally {
-      setIsThinking(false)
+      if (currentMeetingRef.current === meetingId) setIsThinking(false)
     }
   }
 
@@ -427,10 +437,33 @@ function App() {
     setMessages(Array.isArray(meeting.messages) ? meeting.messages : [])
     setSummary(meeting.summary || '')
     setMeetingError('')
+    setIsThinking(false)
     setCurrentMeetingId(meeting.id)
     setView(meeting.summary ? 'result' : 'meeting')
     setMobileNav(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function resumeMeeting() {
+    const meeting = savedMeetings.find((item) => item.id === currentMeetingId)
+    if (meeting) openSavedMeeting(meeting)
+  }
+
+  function appendMeetingMessages(meetingId, addedMessages) {
+    if (!meetingId || !addedMessages?.length) return
+    setSavedMeetings((current) => {
+      const next = current.map((meeting) =>
+        meeting.id === meetingId
+          ? { ...meeting, updatedAt: new Date().toISOString(), messages: [...meeting.messages, ...addedMessages] }
+          : meeting,
+      )
+      try {
+        localStorage.setItem(meetingsStorageKey, JSON.stringify(next))
+      } catch (error) {
+        console.error('无法在本地保存会议记录', error)
+      }
+      return next
+    })
   }
 
   function deleteSavedMeeting(meetingId) {
@@ -450,6 +483,7 @@ function App() {
     setMessages([])
     setSummary('')
     setMeetingError('')
+    setIsThinking(false)
     setView('setup')
     setMobileNav(false)
   }
@@ -457,6 +491,7 @@ function App() {
   async function submitContribution(content) {
     const clean = content.trim()
     if (!clean || isThinking) return
+    const meetingId = currentMeetingId
     const userMessage = { type: 'user', stage: 'user', author: '你', content: clean }
     const nextMessages = [...messages, userMessage]
     setMessages(nextMessages)
@@ -468,11 +503,15 @@ function App() {
         type: 'ai', stage: 'cross-examination', roleId: role.id, author: role.name, model: role.modelId,
         content: await askRole(role, `你是 AI 会议中的"${role.name}"，职责是${role.description}。独立开场已经锁定，现在进入公开交叉质询：你能看到此前的完整会议记录，但看不到其他席位正在生成的本轮回答。请同时完成三件事：1. 直接回应主持人刚才的发言；2. 点名审阅至少一个其他议事席的具体观点，说明你支持、质疑或补充什么以及理由；3. 说明你的初始立场是否改变及原因。不要机械赞同，也不要为了反对而反对；不要替主持人下结论。控制在 300 字以内。`, `原始议题：${form.topic}\n此前完整会议记录：\n${transcript}`, apiConfig),
       })))
-      setMessages([...nextMessages, ...replies])
+      if (currentMeetingRef.current === meetingId) {
+        setMessages([...nextMessages, ...replies])
+      } else {
+        appendMeetingMessages(meetingId, replies)
+      }
     } catch (error) {
-      setMeetingError(error.message)
+      if (currentMeetingRef.current === meetingId) setMeetingError(error.message)
     } finally {
-      setIsThinking(false)
+      if (currentMeetingRef.current === meetingId) setIsThinking(false)
     }
   }
 
@@ -578,7 +617,14 @@ function App() {
           <LiveSummaryView form={form} roles={activeRoles} messages={messages} summary={summary} onBack={() => setView('meeting')} />
         )}
         {view === 'archive' && (
-          <ArchiveView meetings={savedMeetings} onOpen={openSavedMeeting} onDelete={deleteSavedMeeting} onNew={showNewMeeting} />
+          <ArchiveView
+            meetings={savedMeetings}
+            activeMeeting={savedMeetings.find((meeting) => meeting.id === currentMeetingId) || null}
+            onResume={resumeMeeting}
+            onOpen={openSavedMeeting}
+            onDelete={deleteSavedMeeting}
+            onNew={showNewMeeting}
+          />
         )}
       </main>
     </div>
@@ -933,7 +979,7 @@ function Evidence({ number, title, text, source }) {
   return <article className="evidence"><span>{number}</span><div><h3>{title}</h3><p>{text}</p><small>{source}</small></div></article>
 }
 
-function ArchiveView({ meetings, onOpen, onDelete, onNew }) {
+function ArchiveView({ meetings, activeMeeting, onResume, onOpen, onDelete, onNew }) {
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN')
   const filteredMeetings = meetings.filter((meeting) => {
@@ -949,6 +995,20 @@ function ArchiveView({ meetings, onOpen, onDelete, onNew }) {
         <button className="summary-action primary" onClick={onNew}><Plus size={16} /> 发起会议</button>
       </header>
       <div className="archive-content">
+        {activeMeeting && (
+          <div className="resume-banner">
+            <div className="resume-copy">
+              <span className="resume-icon">{activeMeeting.summary ? <FileText size={16} /> : <History size={16} />}</span>
+              <div>
+                <strong>{activeMeeting.summary ? '你正在查看的会议' : '你有一个正在进行的会议'}</strong>
+                <span className="resume-topic">{activeMeeting.form.topic}</span>
+              </div>
+            </div>
+            <button className="resume-button" type="button" onClick={onResume}>
+              {activeMeeting.summary ? '查看纪要' : '继续会议'} <ChevronRight size={15} />
+            </button>
+          </div>
+        )}
         <div className="archive-toolbar">
           <div><LayoutDashboard size={17} /><strong>全部会议</strong><span>{meetings.length}</span></div>
         <label className="archive-search"><SearchCheck size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索议题或纪要" aria-label="搜索会议" /></label>

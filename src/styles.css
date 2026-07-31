@@ -224,6 +224,15 @@ main { width: 100%; }
 .archive-empty strong { color: var(--ink); font-size: 12px; }
 .archive-empty span { font-size: 10px; }
 
+.resume-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 16px; background: #eef4fb; border-bottom: 1px solid var(--line); }
+.resume-copy { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.resume-icon { width: 32px; height: 32px; display: grid; place-items: center; flex: 0 0 auto; color: var(--blue); background: white; border: 1px solid #c6d7ea; border-radius: 50%; }
+.resume-copy > div { display: grid; gap: 3px; min-width: 0; }
+.resume-copy strong { font-size: 11px; }
+.resume-topic { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-button { border: 0; border-radius: 4px; display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px; flex: 0 0 auto; color: white; background: var(--blue); font-size: 10px; font-weight: 700; cursor: pointer; }
+.resume-button:hover { background: #264f9d; }
+
 /* Settings modal */
 .settings-backdrop { position: fixed; inset: 0; background: rgba(23, 31, 35, .42); z-index: 99; display: grid; place-items: center; padding: 20px; animation: fadeIn .2s ease; }
 @keyframes fadeIn { from { opacity: 0; } }
@@ -297,7 +306,9 @@ main { width: 100%; }
   .summary-text { padding: 20px 17px 22px; }
   .summary-next { align-items: flex-start; flex-wrap: wrap; }
   .summary-next button { margin-left: 28px; }
-  .archive-content { margin: 20px 14px 0; }
+    .archive-content { margin: 20px 14px 0; }
+  .resume-banner { align-items: stretch; flex-direction: column; }
+  .resume-button { justify-content: center; }
   .archive-toolbar { align-items: stretch; flex-direction: column; }
   .archive-search { width: 100%; }
   .archive-open { grid-template-columns: 28px minmax(0, 1fr) 18px; gap: 8px; padding: 13px 10px; }
@@ -469,6 +480,10 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
   overflow: hidden;
 }
 .summary-document-head, .archive-toolbar { background: #fafafa; }
+.resume-banner { background: rgba(0, 103, 192, .055); border-bottom-color: rgba(0, 0, 0, .06); }
+.resume-icon { border-radius: 9px; box-shadow: var(--control-shadow); }
+.resume-button { border-radius: 7px; box-shadow: inset 0 1px rgba(255, 255, 255, .24), var(--control-shadow); }
+.resume-button:hover { background: #005a9e; }
 .summary-next { border-radius: 10px; }
 .archive-row { border-bottom-color: rgba(0, 0, 0, .065); }
 .archive-open:hover { background: #f5f5f5; }
