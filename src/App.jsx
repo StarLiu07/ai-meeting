@@ -100,6 +100,27 @@ const initialApiConfig = {
 }
 
 const meetingsStorageKey = 'ai-meeting-records-v1'
+const roleModelsStorageKey = 'ai-meeting-role-models-v1'
+
+function loadSavedRoleModels() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(roleModelsStorageKey) || '{}')
+    if (!saved || Array.isArray(saved) || typeof saved !== 'object') return {}
+    return Object.fromEntries(roles
+      .filter((role) => typeof saved[role.id] === 'string' && saved[role.id])
+      .map((role) => [role.id, saved[role.id]]))
+  } catch {
+    return {}
+  }
+}
+
+function saveRoleModels(roleModels) {
+  try {
+    localStorage.setItem(roleModelsStorageKey, JSON.stringify(roleModels))
+  } catch (error) {
+    console.error('无法在本地保存角色模型偏好', error)
+  }
+}
 
 function loadSavedMeetings() {
   try {
@@ -262,7 +283,7 @@ function App() {
     }
   })
   const [showSettings, setShowSettings] = useState(false)
-  const [roleModels, setRoleModels] = useState({})
+  const [roleModels, setRoleModels] = useState(loadSavedRoleModels)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [testStatus, setTestStatus] = useState(null)
   const [savedMeetings, setSavedMeetings] = useState(loadSavedMeetings)
@@ -301,7 +322,11 @@ function App() {
       .then((items) => {
         const ids = items.map((item) => item.id)
         setModels(ids)
-        setRoleModels((prev) => defaultAssignModels(ids, selected, prev))
+        setRoleModels((prev) => {
+          const next = defaultAssignModels(ids, selected, prev)
+          saveRoleModels(next)
+          return next
+        })
         setApiStatus('ready')
         setMeetingError('')
       })
@@ -354,15 +379,21 @@ function App() {
       return current.length < 5 ? [...current, id] : current
     })
     setRoleModels((prev) => {
-      if (!prev[id] && models.length > 0) {
-        return { ...prev, [id]: models[0] }
+      if ((!prev[id] || !models.includes(prev[id])) && models.length > 0) {
+        const next = { ...prev, [id]: models[0] }
+        saveRoleModels(next)
+        return next
       }
       return prev
     })
   }
 
   function updateRoleModel(roleId, modelId) {
-    setRoleModels((prev) => ({ ...prev, [roleId]: modelId }))
+    setRoleModels((prev) => {
+      const next = { ...prev, [roleId]: modelId }
+      saveRoleModels(next)
+      return next
+    })
   }
 
   async function startMeeting(event) {
@@ -415,6 +446,7 @@ function App() {
 
   function showNewMeeting() {
     setCurrentMeetingId(null)
+    setRoleModels(loadSavedRoleModels())
     setMessages([])
     setSummary('')
     setMeetingError('')
@@ -635,6 +667,7 @@ function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiS
                         value={roleModels[role.id] || models[0]}
                         onChange={(e) => updateRoleModel(role.id, e.target.value)}
                         className="model-select"
+                        aria-label={`配置${role.name}使用的模型`}
                       >
                         {models.map((m) => (
                           <option key={m} value={m}>{m}</option>

@@ -27,6 +27,18 @@ try {
   await desktop.getByRole('heading', { name: '发起讨论' }).waitFor()
   await desktop.screenshot({ path: 'C:\\Users\\Sheldon\\AppData\\Local\\Temp\\opencode\\ai-meeting-desktop.png', fullPage: true })
   await desktop.waitForFunction(() => !document.querySelector('.primary-action')?.disabled)
+  const strategistModel = desktop.getByLabel('配置方案提出者使用的模型')
+  const modelOptions = await strategistModel.locator('option').evaluateAll((options) => options.map((option) => option.value))
+  if (modelOptions.length < 2) throw new Error('Role model persistence check requires at least two available models.')
+  const initialStrategistModel = await strategistModel.inputValue()
+  const persistedStrategistModel = modelOptions.find((model) => model !== initialStrategistModel)
+  await strategistModel.selectOption(persistedStrategistModel)
+  await desktop.reload({ waitUntil: 'networkidle' })
+  await desktop.waitForFunction(() => !document.querySelector('.primary-action')?.disabled)
+  if (await desktop.getByLabel('配置方案提出者使用的模型').inputValue() !== persistedStrategistModel) {
+    throw new Error('The last role model selection was not restored after reload.')
+  }
+  await desktop.getByLabel('配置方案提出者使用的模型').selectOption(initialStrategistModel)
   await desktop.getByRole('button', { name: /开始会议/ }).click()
   await desktop.locator('.meeting-screen').waitFor()
   await desktop.getByPlaceholder('补充事实、质疑假设，或点名请某个议事席展开……').fill('我最担心的是试点期间的错误回答会直接影响客户信任，请先明确人工接管的触发条件。')
@@ -60,7 +72,7 @@ try {
   await mobile.getByRole('heading', { name: '会议档案' }).waitFor()
 
   if (errors.length) throw new Error(`Browser errors:\n${errors.join('\n')}`)
-  console.log('UI verification passed: desktop flow, local archive persistence, and mobile layout.')
+  console.log('UI verification passed: role model preferences, desktop flow, local archive persistence, and mobile layout.')
 } finally {
   await browser.close()
 }
