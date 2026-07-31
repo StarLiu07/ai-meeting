@@ -25,6 +25,7 @@ import {
   ShieldAlert,
   Sparkles,
   Target,
+  Trash2,
   Users,
   Wrench,
   X,
@@ -36,7 +37,7 @@ const roles = [
     id: 'strategist',
     name: '方案提出者',
     model: 'Atlas',
-    modelId: 'claude-sonnet-4-6',
+    modelId: 'claude-sonnet-5',
     description: '提出可落地路径与取舍',
     color: '#2457d6',
     icon: Lightbulb,
@@ -45,7 +46,7 @@ const roles = [
     id: 'critic',
     name: '反方辩手',
     model: 'Sage',
-    modelId: 'glm-5.2',
+    modelId: 'deepseek-v4-pro',
     description: '挑战前提与乐观假设',
     color: '#e4582c',
     icon: MessageSquareWarning,
@@ -54,7 +55,7 @@ const roles = [
     id: 'risk',
     name: '风险审查员',
     model: 'Nova',
-    modelId: 'gpt-5.6-sol',
+    modelId: 'claude-opus-5',
     description: '识别失败模式与边界',
     color: '#8b3fb0',
     icon: ShieldAlert,
@@ -96,6 +97,29 @@ const initialForm = {
 const initialApiConfig = {
   baseUrl: '',
   apiKey: '',
+}
+
+const meetingsStorageKey = 'ai-meeting-records-v1'
+
+function loadSavedMeetings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(meetingsStorageKey) || '[]')
+    return Array.isArray(saved) ? saved.filter((meeting) => meeting?.id && meeting?.form?.topic) : []
+  } catch {
+    return []
+  }
+}
+
+function createMeetingId() {
+  return globalThis.crypto?.randomUUID?.() || `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function formatMeetingDate(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '时间未知'
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date)
 }
 
 function Logo() {
@@ -241,6 +265,8 @@ function App() {
   const [roleModels, setRoleModels] = useState({})
   const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [testStatus, setTestStatus] = useState(null)
+  const [savedMeetings, setSavedMeetings] = useState(loadSavedMeetings)
+  const [currentMeetingId, setCurrentMeetingId] = useState(null)
 
   const selectedRoles = roles.filter((role) => selected.includes(role.id))
 
@@ -290,6 +316,32 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiConfig, refreshTrigger])
 
+  useEffect(() => {
+    if (!currentMeetingId || (view !== 'meeting' && view !== 'result')) return
+
+    setSavedMeetings((current) => {
+      const existing = current.find((meeting) => meeting.id === currentMeetingId)
+      const now = new Date().toISOString()
+      const record = {
+        id: currentMeetingId,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+        form: { ...form },
+        selected: [...selected],
+        roleModels: { ...roleModels },
+        messages: [...messages],
+        summary,
+      }
+      const next = [record, ...current.filter((meeting) => meeting.id !== currentMeetingId)]
+      try {
+        localStorage.setItem(meetingsStorageKey, JSON.stringify(next))
+      } catch (error) {
+        console.error('无法在本地保存会议记录', error)
+      }
+      return next
+    })
+  }, [currentMeetingId, form, messages, roleModels, selected, summary, view])
+
   function updateField(event) {
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }))
   }
@@ -318,6 +370,7 @@ function App() {
     if (!form.topic.trim()) return
     setMessages([])
     setSummary('')
+    setCurrentMeetingId(createMeetingId())
     setMeetingError('')
     setView('meeting')
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -334,6 +387,39 @@ function App() {
     } finally {
       setIsThinking(false)
     }
+  }
+
+  function openSavedMeeting(meeting) {
+    setForm({ ...initialForm, ...meeting.form })
+    setSelected(meeting.selected?.filter((id) => roles.some((role) => role.id === id)) || roles.slice(0, 4).map((role) => role.id))
+    setRoleModels(meeting.roleModels || {})
+    setMessages(Array.isArray(meeting.messages) ? meeting.messages : [])
+    setSummary(meeting.summary || '')
+    setMeetingError('')
+    setCurrentMeetingId(meeting.id)
+    setView(meeting.summary ? 'result' : 'meeting')
+    setMobileNav(false)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function deleteSavedMeeting(meetingId) {
+    const meeting = savedMeetings.find((item) => item.id === meetingId)
+    if (!meeting || !window.confirm(`确定删除“${meeting.form.topic}”的本地记录吗？`)) return
+    setSavedMeetings((current) => {
+      const next = current.filter((item) => item.id !== meetingId)
+      localStorage.setItem(meetingsStorageKey, JSON.stringify(next))
+      return next
+    })
+    if (currentMeetingId === meetingId) setCurrentMeetingId(null)
+  }
+
+  function showNewMeeting() {
+    setCurrentMeetingId(null)
+    setMessages([])
+    setSummary('')
+    setMeetingError('')
+    setView('setup')
+    setMobileNav(false)
   }
 
   async function submitContribution(content) {
@@ -410,11 +496,11 @@ function App() {
       <header className="topbar">
         <Logo />
         <nav className={mobileNav ? 'main-nav is-open' : 'main-nav'} aria-label="主导航">
-          <button className={view === 'setup' ? 'nav-item active' : 'nav-item'} onClick={() => { setView('setup'); setMobileNav(false) }}>
-            <Plus size={17} /> 新会议
+          <button className={view === 'setup' ? 'nav-item active' : 'nav-item'} onClick={showNewMeeting}>
+            <Plus size={17} /> 发起会议
           </button>
           <button className={view === 'archive' ? 'nav-item active' : 'nav-item'} onClick={() => { setView('archive'); setMobileNav(false) }}>
-            <FileText size={17} /> 决议档案
+            <FileText size={17} /> 会议档案
           </button>
         </nav>
         <div className="top-actions">
@@ -460,7 +546,7 @@ function App() {
           <LiveSummaryView form={form} roles={activeRoles} messages={messages} summary={summary} onBack={() => setView('meeting')} />
         )}
         {view === 'archive' && (
-          <ArchiveView onOpen={() => setView('result')} onNew={() => setView('setup')} />
+          <ArchiveView meetings={savedMeetings} onOpen={openSavedMeeting} onDelete={deleteSavedMeeting} onNew={showNewMeeting} />
         )}
       </main>
     </div>
@@ -470,37 +556,39 @@ function App() {
 function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiStatus, models, roleModels, updateRoleModel }) {
   const canStart = form.topic.trim().length > 0 && selected.length >= 3 && apiStatus === 'ready'
   return (
-    <div className="setup-page page-enter">
-      <section className="page-heading">
+    <div className="chat-page setup-page page-enter">
+      <header className="chat-header">
         <div>
-          <span className="section-kicker">NEW SESSION</span>
-          <h1>发起一场有结论的会议</h1>
-          <p>先定义问题与边界。参与者会向你发问，你来决定讨论往哪里走。</p>
+          <span className="chat-status"><span /> 新会议</span>
+          <h1>发起讨论</h1>
         </div>
-        <div className="protocol-note">
-          <span className="protocol-icon"><Scale size={19} /></span>
-          <div><strong>标准议事协议</strong><span>4 个阶段 · 约 3 分钟</span></div>
-        </div>
-      </section>
+        <span className="header-note"><Scale size={15} /> 你将担任会议主持人</span>
+      </header>
 
-      <form className="workspace" onSubmit={startMeeting}>
-        <section className="brief-panel">
-          <div className="panel-heading">
-            <span className="step-number">01</span>
-            <div><h2>明确议题</h2><p>具体的问题会得到更有用的决议。</p></div>
+      <form className="setup-workspace" onSubmit={startMeeting}>
+        <section className="setup-conversation">
+          <div className="guide-message">
+            <span className="guide-avatar"><Bot size={19} /></span>
+            <div>
+              <div className="message-meta"><strong>圆桌助手</strong><span>会议准备</span></div>
+              <p>你希望议事席共同讨论什么？请把目标、已知事实和不能突破的边界一并告诉我。</p>
+            </div>
           </div>
+
+          <div className="brief-composer">
+            <div className="composer-title"><span>会议简报</span><small>信息越具体，讨论越有针对性</small></div>
           <div className="form-stack">
             <label className="field field-primary">
-              <span>会议议题 <b>必填</b></span>
-              <textarea name="topic" value={form.topic} onChange={updateField} rows="2" placeholder="需要会议回答的核心问题是什么？" required />
+              <span>议题 <b>必填</b></span>
+              <textarea name="topic" value={form.topic} onChange={updateField} rows="2" maxLength="120" placeholder="需要会议回答的核心问题是什么？" required />
               <small>{form.topic.length}/120</small>
             </label>
             <label className="field">
-              <span>决策目标</span>
+              <span>你想得到什么结果</span>
               <textarea name="goal" value={form.goal} onChange={updateField} rows="2" placeholder="你希望这次会议帮助达成什么？" />
             </label>
             <label className="field">
-              <span>必要背景</span>
+              <span>背景与已知事实</span>
               <textarea name="context" value={form.context} onChange={updateField} rows="3" placeholder="现状、已有数据、相关团队……" />
             </label>
             <label className="field">
@@ -508,12 +596,21 @@ function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiS
               <textarea name="constraints" value={form.constraints} onChange={updateField} rows="2" placeholder="预算、时间、合规要求等不可突破的边界" />
             </label>
           </div>
+            <div className="setup-submit-row">
+              <p className={apiStatus === 'error' ? 'connection-state api-error' : 'connection-state'}>
+                {apiStatus === 'ready' ? <><CheckCircle2 size={14} /> 模型服务已连接</> : apiStatus === 'loading' ? <><LoaderCircle size={14} className="spin" /> 正在连接模型服务</> : <><AlertTriangle size={14} /> 请检查 API 设置</>}
+              </p>
+              <button className="primary-action" type="submit" disabled={!canStart}>
+                开始会议 <ArrowRight size={17} />
+              </button>
+            </div>
+          </div>
         </section>
 
-        <aside className="roles-panel">
-          <div className="panel-heading compact">
-            <span className="step-number">02</span>
-            <div><h2>组建议事席</h2><p>选择 3–5 个互补角色，并为每位指定模型。</p></div>
+        <aside className="setup-roster">
+          <div className="roster-heading">
+            <div><h2>议事席</h2><p>选择 3–5 位角色</p></div>
+            <span>{selected.length}/5</span>
           </div>
           <div className="role-list">
             {roles.map((role) => {
@@ -549,16 +646,7 @@ function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiS
               )
             })}
           </div>
-          <div className="selection-status">
-            <div><Users size={17} /><span>已选择 <strong>{selected.length}</strong> 位参与者</span></div>
-            <span>{models.length ? `已连接 ${models.length} 个模型` : '正在连接模型'}</span>
-          </div>
-          <button className="primary-action" type="submit" disabled={!canStart}>
-            开始会议 <ArrowRight size={18} />
-          </button>
-          <p className={apiStatus === 'error' ? 'privacy-line api-error' : 'privacy-line'}>
-            {apiStatus === 'ready' ? <><CheckCircle2 size={14} /> API 已连接，会议会等待你的每次发言</> : apiStatus === 'loading' ? <><LoaderCircle size={14} className="spin" /> 正在连接模型服务</> : <><AlertTriangle size={14} /> {`模型服务未连接：${apiStatus === 'error' ? '请检查 .env.local 或 API 设置' : ''}`}</>}
-          </p>
+          <p className="roster-note"><Users size={14} /> 每位角色先独立思考，再公开讨论。</p>
         </aside>
       </form>
     </div>
@@ -577,47 +665,60 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
   }
 
   return (
-    <div className="live-room page-enter">
-      <div className="room-topline">
-        <div><span className="live-dot" /> LIVE DISCUSSION <span>· {activeRoles.length} 个 AI 议事席</span></div>
-        <span className="room-rule"><Users size={14} /> 你是主持人，不是旁观者</span>
-      </div>
-      <section className="room-heading">
-        <span className="section-kicker">OPEN FLOOR · ROUND {hasUserTurn ? '02' : '01'}</span>
-        <h1>{form.topic}</h1>
-        <p>AI 已经分别提交并锁定初步判断。读完后写下你的事实、疑问或反对意见；下一轮将公开这些观点，由各席位回应你并相互质询。</p>
-      </section>
+    <div className="meeting-screen page-enter">
+      <header className="chat-header meeting-header">
+        <div>
+          <span className="chat-status live"><span /> 会议进行中 · 第 {hasUserTurn ? '2' : '1'} 轮</span>
+          <h1>{form.topic}</h1>
+        </div>
+        <button className="summary-action" type="button" disabled={!hasUserTurn || isThinking} onClick={onFinish}><FileText size={16} /> 形成阶段纪要</button>
+      </header>
 
-      <div className="room-layout">
-        <section className="discussion-feed">
-          <div className="feed-header"><div><strong>讨论现场</strong><span>{messages.length} 条发言</span></div><span className="feed-lock"><CheckCircle2 size={14} /> 独立分析已完成</span></div>
+      <div className="meeting-workspace">
+        <section className="conversation-column">
+          <div className="discussion-feed" aria-live="polite">
+            <div className="round-divider"><span>独立开场</span><small><CheckCircle2 size={13} /> 各席位观点已锁定并公开</small></div>
           {messages.length === 0 && isThinking && (
-            <div className="thinking-state"><LoaderCircle size={23} className="spin" /><strong>议事席正在准备各自的开场观点</strong><span>仅本轮互不可见，提交后将同时公开</span></div>
+              <div className="thinking-state"><LoaderCircle size={23} className="spin" /><strong>议事席正在独立思考</strong><span>提交前彼此不可见</span></div>
           )}
           {messages.map((message, index) => {
             const role = activeRoles.find((item) => item.id === message.roleId)
             const Icon = role?.icon || Users
+              const startsPublicRound = message.stage === 'user' && messages[index - 1]?.stage === 'opening'
             return (
-              <article className={message.type === 'user' ? 'speech user-speech' : 'speech'} key={`${message.author}-${index}`}>
-                <div className="speech-avatar" style={{ '--role-color': role?.color || '#172027' }}>{message.type === 'user' ? '你' : <Icon size={17} />}</div>
-                <div className="speech-body">
-                  <div className="speech-byline"><strong>{message.author}</strong>{message.model && <span>{message.model}</span>}<small>{message.type === 'user' ? '主持人发言' : message.stage === 'opening' ? '独立开场' : '公开质询'}</small></div>
-                  <MarkdownContent>{message.content}</MarkdownContent>
+                <div key={`${message.author}-${index}`}>
+                  {startsPublicRound && <div className="round-divider"><span>公开讨论</span><small>所有席位可见此前记录</small></div>}
+                  <article className={message.type === 'user' ? 'speech user-speech' : 'speech'}>
+                    <div className="speech-avatar" style={{ '--role-color': role?.color || '#20282d' }}>{message.type === 'user' ? '你' : <Icon size={17} />}</div>
+                    <div className="speech-body">
+                      <div className="speech-byline"><strong>{message.author}</strong><small>{message.type === 'user' ? '主持人' : message.stage === 'opening' ? '独立开场' : '公开质询'}</small></div>
+                      <MarkdownContent>{message.content}</MarkdownContent>
+                      {message.model && <span className="model-stamp">{message.model}</span>}
+                    </div>
+                  </article>
                 </div>
-              </article>
             )
           })}
-          {isThinking && messages.length > 0 && <div className="replying-state"><LoaderCircle size={17} className="spin" /> AI 正在回应你并交叉审阅其他观点…</div>}
+            {isThinking && messages.length > 0 && <div className="replying-state"><LoaderCircle size={17} className="spin" /><span><strong>议事席正在回应</strong>同时交叉审阅其他观点</span></div>}
+          </div>
+
+          <section className="human-turn">
+            <form onSubmit={submit}>
+              <textarea value={draft} maxLength="800" onChange={(event) => setDraft(event.target.value)} placeholder="补充事实、质疑假设，或点名请某个议事席展开……" rows="3" disabled={isThinking} />
+              <div className="composer-footer">
+                <span>{isThinking ? '请等待本轮回应完成' : `${draft.length}/800`}</span>
+                <button className="send-button" type="submit" aria-label="发送发言" title="发送发言" disabled={!draft.trim() || isThinking}><Send size={17} /></button>
+              </div>
+            </form>
+            {error && <div className="room-error"><AlertTriangle size={15} /> {error}</div>}
+            <p className="composer-hint">你的发言会开启下一轮，所有议事席将并行回应。</p>
+          </section>
         </section>
 
-        <aside className="room-sidebar">
-          <div className="room-card human-role">
-            <div className="room-card-label"><span className="section-kicker">YOUR ROLE</span><span className="human-badge">主持人</span></div>
-            <h2>把你的判断放进来</h2>
-            <p>你可以补充现场事实、质疑某个假设，或要求某位议事席展开。没有你的发言，会议不会进入下一轮。</p>
-          </div>
-          <div className="room-card participant-list">
-            <div className="room-card-label"><span className="section-kicker">AT THE TABLE</span><span><Wrench size={11} /> 可调整模型</span></div>
+        <aside className="participant-panel">
+          <div className="participant-panel-head"><div><h2>会议成员</h2><p>{activeRoles.length} 个 AI 议事席 · 你主持</p></div><Users size={18} /></div>
+          <div className="participant-list">
+            <div className="host-member"><span>你</span><div><strong>会议主持人</strong><small>决定讨论方向</small></div><i /></div>
             {activeRoles.map((role) => {
               const Icon = role.icon
               return (
@@ -639,34 +740,33 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
                 </div>
               )
             })}
-            <p className="model-change-note">切换后从下一轮发言生效，已有记录仍保留原模型。</p>
           </div>
+          <p className="model-change-note"><Wrench size={12} /> 模型切换从下一轮生效。</p>
+          <div className="meeting-rule"><CheckCircle2 size={15} /><p><strong>当前议事规则</strong><span>同轮回答并行生成，席位之间不可互相抄看。</span></p></div>
         </aside>
       </div>
-
-      <section className="human-turn">
-        <div className="turn-label"><span className="turn-marker">你</span><div><strong>轮到你了</strong><span>写完后，AI 会看到此前记录，分别回应你并相互质询</span></div></div>
-        <form onSubmit={submit}>
-          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="我想补充…… / 我不同意…… / 请解释……" rows="3" disabled={isThinking} />
-          <div className="composer-footer"><span>{draft.length}/800</span><button className="send-button" type="submit" disabled={!draft.trim() || isThinking}>发言并继续 <Send size={16} /></button></div>
-        </form>
-        {error && <div className="room-error"><AlertTriangle size={15} /> {error}</div>}
-        <div className="finish-row"><span>至少完成一轮你的发言后，才可以整理纪要</span><button className="finish-button" type="button" disabled={!hasUserTurn || isThinking} onClick={onFinish}>形成阶段纪要 <ArrowRight size={16} /></button></div>
-      </section>
     </div>
   )
 }
 
 function LiveSummaryView({ form, roles: activeRoles, messages, summary, onBack }) {
   return (
-    <div className="live-summary page-enter">
-      <button className="back-link" onClick={onBack}><ArrowLeft size={17} /> 回到讨论现场</button>
-      <div className="summary-banner"><div><span className="section-kicker">HUMAN-IN-THE-LOOP RECORD</span><h1>{form.topic}</h1><p>这不是自动答案，而是基于你参与过的讨论形成的阶段纪要。</p></div><span className="summary-mark"><CheckCircle2 size={23} /> 已整理</span></div>
-      <div className="summary-layout">
-        <section className="summary-copy"><div className="section-label"><Scale size={18} /> 主持人纪要</div><MarkdownContent className="summary-text">{summary}</MarkdownContent></section>
-        <aside className="summary-side"><div className="section-label"><Users size={18} /> 参与者</div>{activeRoles.map((role) => <div className="summary-member" key={role.id}><span className="role-icon" style={{ '--role-color': role.color }}><role.icon size={15} /></span><div><strong>{role.name}</strong><small>{role.modelId}</small></div></div>)}<div className="summary-member user"><span>你</span><div><strong>会议主持人</strong><small>参与了 {messages.filter((item) => item.type === 'user').length} 轮发言</small></div></div></aside>
+    <div className="chat-page summary-page page-enter">
+      <header className="chat-header">
+        <div><span className="chat-status complete"><CheckCircle2 size={13} /> 阶段纪要已形成</span><h1>{form.topic}</h1></div>
+        <button className="summary-action" onClick={onBack}><ArrowLeft size={16} /> 继续讨论</button>
+      </header>
+      <div className="summary-conversation">
+        <div className="guide-message summary-intro">
+          <span className="guide-avatar"><Scale size={19} /></span>
+          <div><div className="message-meta"><strong>会议主持</strong><span>基于当前讨论</span></div><p>我已整理此刻最有力的方案、依据、分歧和待决问题。这份纪要不会替你作出最终决定。</p></div>
+        </div>
+        <article className="summary-document">
+          <div className="summary-document-head"><div><FileText size={18} /><strong>阶段会议纪要</strong></div><span>{activeRoles.length + 1} 位参与者 · {messages.filter((item) => item.type === 'user').length} 轮主持发言</span></div>
+          <MarkdownContent className="summary-text">{summary}</MarkdownContent>
+        </article>
+        <div className="summary-next"><Sparkles size={17} /><span><strong>结论仍可被新信息改变</strong>继续追问，或回到新会议讨论另一个议题。</span><button onClick={onBack}>继续讨论 <ChevronRight size={16} /></button></div>
       </div>
-      <div className="summary-next"><Sparkles size={17} /><strong>下一步不是接受答案，而是决定继续追问什么。</strong><button onClick={onBack}>继续讨论 <ChevronRight size={16} /></button></div>
     </div>
   )
 }
@@ -800,21 +900,49 @@ function Evidence({ number, title, text, source }) {
   return <article className="evidence"><span>{number}</span><div><h3>{title}</h3><p>{text}</p><small>{source}</small></div></article>
 }
 
-function ArchiveView({ onOpen, onNew }) {
+function ArchiveView({ meetings, onOpen, onDelete, onNew }) {
+  const [query, setQuery] = useState('')
+  const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN')
+  const filteredMeetings = meetings.filter((meeting) => {
+    if (!normalizedQuery) return true
+    return [meeting.form.topic, meeting.form.goal, meeting.form.context, meeting.summary]
+      .some((value) => value?.toLocaleLowerCase('zh-CN').includes(normalizedQuery))
+  })
+
   return (
-    <div className="archive-page page-enter">
-      <section className="page-heading">
-        <div><span className="section-kicker">DECISION ARCHIVE</span><h1>决议档案</h1><p>回看依据、分歧与立场变化，而不只是最终答案。</p></div>
-        <button className="secondary-action" onClick={onNew}><Plus size={17} /> 新会议</button>
-      </section>
-      <div className="archive-toolbar"><div><LayoutDashboard size={17} /><strong>全部决议</strong><span>1</span></div><button><SearchCheck size={17} /> 搜索</button></div>
-      <button className="archive-row" onClick={onOpen}>
-        <span className="archive-status"><CheckCircle2 size={19} /></span>
-        <span className="archive-copy"><strong>我们是否应该把 AI 客服接入现有售后流程？</strong><small>受控试点 · 先覆盖物流查询与退换货规则</small></span>
-        <span className="archive-score"><strong>78%</strong><small>置信度</small></span>
-        <span className="archive-date">2026.07.30</span>
-        <ChevronRight size={18} />
-      </button>
+    <div className="chat-page archive-page page-enter">
+      <header className="chat-header">
+        <div><span className="chat-status"><History size={13} /> 本地记录</span><h1>会议档案</h1></div>
+        <button className="summary-action primary" onClick={onNew}><Plus size={16} /> 发起会议</button>
+      </header>
+      <div className="archive-content">
+        <div className="archive-toolbar">
+          <div><LayoutDashboard size={17} /><strong>全部会议</strong><span>{meetings.length}</span></div>
+        <label className="archive-search"><SearchCheck size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索议题或纪要" aria-label="搜索会议" /></label>
+        </div>
+        {filteredMeetings.length > 0 ? (
+          <div className="archive-list">
+            {filteredMeetings.map((meeting) => (
+              <div className="archive-row" key={meeting.id}>
+                <button className="archive-open" onClick={() => onOpen(meeting)} aria-label={`打开会议：${meeting.form.topic}`}>
+                  <span className={meeting.summary ? 'archive-status complete' : 'archive-status'}>{meeting.summary ? <CheckCircle2 size={19} /> : <Clock3 size={19} />}</span>
+                  <span className="archive-copy"><strong>{meeting.form.topic}</strong><small>{meeting.summary ? '已形成阶段纪要' : '讨论进行中'} · {meeting.messages?.length || 0} 条发言 · {meeting.selected?.length || 0} 个 AI 议事席</small></span>
+                  <span className="archive-state">{meeting.summary ? '已整理' : '可继续'}</span>
+                  <span className="archive-date">{formatMeetingDate(meeting.updatedAt || meeting.createdAt)}</span>
+                  <ChevronRight size={18} />
+                </button>
+                <button className="archive-delete" onClick={() => onDelete(meeting.id)} aria-label={`删除会议：${meeting.form.topic}`} title="删除本地记录"><Trash2 size={17} /></button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="archive-empty">
+            <FileText size={28} />
+            <strong>{meetings.length ? '没有匹配的会议' : '还没有本地会议记录'}</strong>
+            <span>{meetings.length ? '换一个关键词试试' : '开始会议后，讨论内容会自动保存在这里。'}</span>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
