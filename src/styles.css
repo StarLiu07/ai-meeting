@@ -171,6 +171,7 @@ main { width: 100%; }
 .participant-panel-head h2 { margin: 0 0 4px; color: var(--ink); font-size: 13px; }
 .participant-panel-head p { margin: 0; font-size: 9px; }
 .host-member, .table-member { display: flex; align-items: center; gap: 9px; min-height: 57px; padding: 10px 3px; border-bottom: 1px solid #e8eced; }
+.table-member { align-items: flex-start; }
 .host-member > span { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--ink); font-size: 10px; font-weight: 700; }
 .host-member > div { display: grid; gap: 3px; }
 .host-member strong, .table-member strong { font-size: 10px; }
@@ -179,6 +180,15 @@ main { width: 100%; }
 .table-member-config { display: grid; gap: 4px; min-width: 0; flex: 1; }
 .table-member-config select { width: 100%; min-width: 0; border: 0; background: transparent; color: var(--muted); padding: 0 18px 0 0; font: 8px/1.4 Consolas, monospace; }
 .table-member-config select:disabled { color: #9ca5aa; cursor: not-allowed; }
+.table-member-state { display: grid; justify-items: end; gap: 4px; max-width: 142px; margin-left: auto; }
+.seat-status { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--muted); font-size: 8px; line-height: 1.35; text-align: right; }
+.seat-status.pending { color: var(--blue); }
+.seat-status.success { color: var(--green); }
+.seat-status.error, .seat-status.unavailable { color: #a94124; }
+.seat-status.timeout { color: #9a721c; }
+.retry-role-button { display: inline-flex; align-items: center; gap: 3px; border: 1px solid #d8b6aa; border-radius: 4px; padding: 3px 5px; color: #a94124; background: #fff8f5; font-size: 8px; cursor: pointer; }
+.retry-role-button:hover { background: #fff0eb; border-color: #c78f7f; }
+.retry-role-button:disabled { opacity: .45; cursor: not-allowed; }
 .model-change-note { display: flex; align-items: center; gap: 5px; color: var(--quiet); font-size: 8px; line-height: 1.5; margin: 11px 4px 0; }
 .meeting-rule { display: flex; align-items: flex-start; gap: 8px; margin-top: 20px; padding: 12px; color: var(--green); background: #eff7f4; }
 .meeting-rule p { display: grid; gap: 4px; margin: 0; }

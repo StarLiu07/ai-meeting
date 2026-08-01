@@ -18,6 +18,7 @@ import {
   Menu,
   MessageSquareWarning,
   Plus,
+  RotateCw,
   Scale,
   SearchCheck,
   Send,
@@ -101,6 +102,58 @@ const initialApiConfig = {
 
 const meetingsStorageKey = 'ai-meeting-records-v1'
 const roleModelsStorageKey = 'ai-meeting-role-models-v1'
+const modelRequestTimeoutMs = 45000
+
+class ModelRequestError extends Error {
+  constructor(message, kind = 'error') {
+    super(message)
+    this.name = 'ModelRequestError'
+    this.kind = kind
+  }
+}
+
+function getRoleStatusMeta(status = 'idle') {
+  const metadata = {
+    idle: { label: '等待下一轮', className: 'idle', Icon: Clock3, retryable: false },
+    pending: { label: '正在生成', className: 'pending', Icon: LoaderCircle, retryable: false },
+    success: { label: '已完成', className: 'success', Icon: CheckCircle2, retryable: false },
+    error: { label: '请求失败，可单独重试', className: 'error', Icon: AlertTriangle, retryable: true },
+    timeout: { label: '超时，可单独重试', className: 'timeout', Icon: Clock3, retryable: true },
+    unavailable: { label: '模型不可用', className: 'unavailable', Icon: ShieldAlert, retryable: true },
+  }
+  return metadata[status] || metadata.error
+}
+
+function classifyModelError(error) {
+  if (error instanceof ModelRequestError) return error.kind
+  return 'error'
+}
+
+function createRoleStatuses(activeRoles, roundId, status = 'idle') {
+  return Object.fromEntries(activeRoles.map((role) => [role.id, {
+    status,
+    roundId,
+    model: role.modelId,
+  }]))
+}
+
+function getRestoredRoleStatuses(meeting, activeRoles) {
+  const savedStatuses = meeting.roleStatuses && typeof meeting.roleStatuses === 'object' ? meeting.roleStatuses : {}
+  const messages = Array.isArray(meeting.messages) ? meeting.messages : []
+  return Object.fromEntries(activeRoles.map((role) => {
+    const saved = savedStatuses[role.id]
+    if (saved) {
+      return [role.id, saved.status === 'pending'
+        ? { ...saved, status: 'error', error: '上次请求未完成，请重试。' }
+        : saved]
+    }
+    return [role.id, {
+      status: messages.some((message) => message.roleId === role.id) ? 'success' : 'idle',
+      roundId: 'restored',
+      model: role.modelId,
+    }]
+  }))
+}
 
 function loadSavedRoleModels() {
   try {
@@ -161,17 +214,49 @@ function getApiHeaders(apiConfig) {
 }
 
 async function requestModel(model, system, prompt, apiConfig = {}) {
-  const response = await fetch('/api/chat', {
-    method: 'POST',
-    headers: getApiHeaders(apiConfig),
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
-    }),
-  })
-  const payload = await response.json()
-  if (!response.ok) throw new Error(payload.error?.message || payload.error || '模型没有返回结果')
-  return payload.choices?.[0]?.message?.content?.trim() || '这个议事席暂时没有提交内容。'
+  const controller = new AbortController()
+  let timedOut = false
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, modelRequestTimeoutMs)
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: getApiHeaders(apiConfig),
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+      }),
+    })
+    const raw = await response.text()
+    let payload = {}
+    try {
+      payload = raw ? JSON.parse(raw) : {}
+    } catch {
+      if (!response.ok) throw new ModelRequestError(`模型服务返回了无法识别的错误（HTTP ${response.status}）。`)
+      throw new ModelRequestError('模型服务返回了无法识别的结果。')
+    }
+    if (!response.ok) {
+      const message = payload.error?.message || payload.error || `模型请求失败（HTTP ${response.status}）`
+      const messageText = String(message)
+      const unavailable = response.status === 404
+        || /model[^\n]*(not found|does not exist|unavailable)|模型[^\n]*(不存在|不可用)/i.test(messageText)
+      throw new ModelRequestError(messageText, unavailable ? 'unavailable' : 'error')
+    }
+    const content = payload.choices?.[0]?.message?.content
+    return typeof content === 'string' && content.trim() ? content.trim() : '这个议事席暂时没有提交内容。'
+  } catch (error) {
+    if (timedOut || error.name === 'AbortError') {
+      throw new ModelRequestError(`模型响应超过 ${Math.round(modelRequestTimeoutMs / 1000)} 秒，已停止等待。`, 'timeout')
+    }
+    if (error instanceof ModelRequestError) throw error
+    throw new ModelRequestError(`模型服务连接失败：${error.message}`)
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
 }
 
 function transcriptText(messages) {
@@ -194,11 +279,7 @@ function MarkdownContent({ children, className = '' }) {
 }
 
 async function askRole(role, system, prompt, apiConfig = {}) {
-  try {
-    return await requestModel(role.modelId, system, prompt, apiConfig)
-  } catch (error) {
-    return `本轮没有成功提交：${error.message}。这不是会议结论，主持人可以选择忽略这一席或稍后重试。`
-  }
+  return requestModel(role.modelId, system, prompt, apiConfig)
 }
 
 function SettingsModal({ config, onSave, onClose, onTest, testStatus }) {
@@ -288,7 +369,10 @@ function App() {
   const [testStatus, setTestStatus] = useState(null)
   const [savedMeetings, setSavedMeetings] = useState(loadSavedMeetings)
   const [currentMeetingId, setCurrentMeetingId] = useState(null)
+  const [roleStatuses, setRoleStatuses] = useState({})
   const currentMeetingRef = useRef(null)
+  const activeRunRef = useRef(null)
+  const lastBatchRef = useRef(null)
 
   useEffect(() => {
     currentMeetingRef.current = currentMeetingId
@@ -300,6 +384,77 @@ function App() {
     ...role,
     modelId: roleModels[role.id] || models[0] || role.modelId,
   }))
+
+  function isCurrentRun(meetingId, roundId) {
+    return currentMeetingRef.current === meetingId
+      && activeRunRef.current?.meetingId === meetingId
+      && activeRunRef.current?.roundId === roundId
+  }
+
+  function updateRoleStatusForRun(meetingId, roundId, roleId, patch) {
+    if (!isCurrentRun(meetingId, roundId)) return
+    setRoleStatuses((current) => ({
+      ...current,
+      [roleId]: { ...current[roleId], ...patch, roundId },
+    }))
+  }
+
+  function createRoleMessage(batch, role, content) {
+    return {
+      type: 'ai',
+      stage: batch.stage,
+      roundId: batch.roundId,
+      roleId: role.id,
+      author: role.name,
+      model: role.modelId,
+      content,
+    }
+  }
+
+  async function runRoleBatch(batch) {
+    const settled = await Promise.allSettled(batch.roles.map((role) => (
+      askRole(role, batch.system(role), batch.prompt, apiConfig)
+        .then((content) => {
+          updateRoleStatusForRun(batch.meetingId, batch.roundId, role.id, {
+            status: 'success',
+            model: role.modelId,
+            error: '',
+          })
+          return { role, content }
+        })
+        .catch((error) => {
+          updateRoleStatusForRun(batch.meetingId, batch.roundId, role.id, {
+            status: classifyModelError(error),
+            model: role.modelId,
+            error: error.message,
+          })
+          throw error
+        })
+    )))
+
+    const statuses = createRoleStatuses(batch.roles, batch.roundId)
+    const messages = []
+    settled.forEach((result, index) => {
+      const role = batch.roles[index]
+      if (result.status === 'fulfilled') {
+        statuses[role.id] = {
+          status: 'success',
+          roundId: batch.roundId,
+          model: role.modelId,
+          error: '',
+        }
+        messages.push(createRoleMessage(batch, role, result.value.content))
+      } else {
+        statuses[role.id] = {
+          status: classifyModelError(result.reason),
+          roundId: batch.roundId,
+          model: role.modelId,
+          error: result.reason?.message || '模型没有返回结果',
+        }
+      }
+    })
+    return { messages, statuses }
+  }
 
   function defaultAssignModels(availableModels, currentSelected, currentRoleModels) {
     if (!availableModels.length) return currentRoleModels
@@ -360,6 +515,7 @@ function App() {
         selected: [...selected],
         roleModels: { ...roleModels },
         messages: [...messages],
+        roleStatuses: { ...roleStatuses },
         summary,
       }
       const next = [record, ...current.filter((meeting) => meeting.id !== currentMeetingId)]
@@ -370,7 +526,7 @@ function App() {
       }
       return next
     })
-  }, [currentMeetingId, form, messages, roleModels, selected, summary, view])
+  }, [currentMeetingId, form, messages, roleModels, roleStatuses, selected, summary, view])
 
   function updateField(event) {
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }))
@@ -405,40 +561,84 @@ function App() {
     event.preventDefault()
     if (!form.topic.trim()) return
     const meetingId = createMeetingId()
+    const roundId = createMeetingId()
+    const openingPrompt = `会议议题：${form.topic}\n决策目标：${form.goal}\n必要背景：${form.context}\n限制条件：${form.constraints}\n\n请先独立分析这个议题，不要假装已经看过其他参与者的意见。给出你的初步立场、两条关键依据，并提出一个你希望会议主持人（用户）回答的问题。控制在 250 字以内。`
+    const batch = {
+      meetingId,
+      roundId,
+      stage: 'opening',
+      roles: activeRoles.map((role) => ({ ...role })),
+      prompt: openingPrompt,
+      system: (role) => `你是 AI 会议中的"${role.name}"。你的职责是${role.description}。你必须清楚区分事实、推测和价值判断，不要替用户做最终决定。`,
+    }
     setMessages([])
     setSummary('')
     setCurrentMeetingId(meetingId)
+    currentMeetingRef.current = meetingId
+    activeRunRef.current = batch
+    lastBatchRef.current = batch
+    setRoleStatuses(createRoleStatuses(batch.roles, roundId, 'pending'))
     setMeetingError('')
     setView('meeting')
     window.scrollTo({ top: 0, behavior: 'smooth' })
     setIsThinking(true)
     try {
-      const prompt = `会议议题：${form.topic}\n决策目标：${form.goal}\n必要背景：${form.context}\n限制条件：${form.constraints}\n\n请先独立分析这个议题，不要假装已经看过其他参与者的意见。给出你的初步立场、两条关键依据，并提出一个你希望会议主持人（用户）回答的问题。控制在 250 字以内。`
-      const opening = await Promise.all(activeRoles.map(async (role) => ({
-        type: 'ai', stage: 'opening', roleId: role.id, author: role.name, model: role.modelId,
-        content: await askRole(role, `你是 AI 会议中的"${role.name}"。你的职责是${role.description}。你必须清楚区分事实、推测和价值判断，不要替用户做最终决定。`, prompt, apiConfig),
-      })))
-      if (currentMeetingRef.current === meetingId) {
+      const { messages: opening, statuses } = await runRoleBatch(batch)
+      if (isCurrentRun(meetingId, roundId)) {
+        setRoleStatuses(statuses)
         setMessages(opening)
       } else {
-        appendMeetingMessages(meetingId, opening)
+        appendMeetingMessages(meetingId, opening, statuses)
       }
     } catch (error) {
-      if (currentMeetingRef.current === meetingId) setMeetingError(error.message)
+      if (isCurrentRun(meetingId, roundId)) setMeetingError(error.message)
     } finally {
-      if (currentMeetingRef.current === meetingId) setIsThinking(false)
+      if (isCurrentRun(meetingId, roundId)) setIsThinking(false)
     }
   }
 
   function openSavedMeeting(meeting) {
-    setForm({ ...initialForm, ...meeting.form })
-    setSelected(meeting.selected?.filter((id) => roles.some((role) => role.id === id)) || roles.slice(0, 4).map((role) => role.id))
+    const nextForm = { ...initialForm, ...meeting.form }
+    const nextSelected = meeting.selected?.filter((id) => roles.some((role) => role.id === id)) || roles.slice(0, 4).map((role) => role.id)
+    const meetingRoles = roles
+      .filter((role) => nextSelected.includes(role.id))
+      .map((role) => ({ ...role, modelId: meeting.roleModels?.[role.id] || models[0] || role.modelId }))
+    const restoredStatuses = getRestoredRoleStatuses(meeting, meetingRoles)
+    const restoredMessages = Array.isArray(meeting.messages) ? meeting.messages : []
+    const lastUserIndex = restoredMessages.findLastIndex((message) => message.type === 'user')
+    const retryable = meetingRoles.some((role) => getRoleStatusMeta(restoredStatuses[role.id]?.status).retryable)
+
+    setForm(nextForm)
+    setSelected(nextSelected)
     setRoleModels(meeting.roleModels || {})
-    setMessages(Array.isArray(meeting.messages) ? meeting.messages : [])
+    setMessages(restoredMessages)
+    setRoleStatuses(restoredStatuses)
     setSummary(meeting.summary || '')
     setMeetingError('')
     setIsThinking(false)
     setCurrentMeetingId(meeting.id)
+    currentMeetingRef.current = meeting.id
+    activeRunRef.current = null
+    lastBatchRef.current = null
+    if (retryable && !meeting.summary) {
+      const stage = lastUserIndex >= 0 ? 'cross-examination' : 'opening'
+      const roundId = restoredMessages[lastUserIndex]?.roundId
+        || Object.values(restoredStatuses).find((status) => getRoleStatusMeta(status?.status).retryable)?.roundId
+        || createMeetingId()
+      const prompt = stage === 'opening'
+        ? `会议议题：${nextForm.topic}\n决策目标：${nextForm.goal}\n必要背景：${nextForm.context}\n限制条件：${nextForm.constraints}\n\n请先独立分析这个议题，不要假装已经看过其他参与者的意见。给出你的初步立场、两条关键依据，并提出一个你希望会议主持人（用户）回答的问题。控制在 250 字以内。`
+        : `原始议题：${nextForm.topic}\n此前完整会议记录：\n${transcriptText(restoredMessages.slice(0, lastUserIndex + 1))}`
+      lastBatchRef.current = {
+        meetingId: meeting.id,
+        roundId,
+        stage,
+        roles: meetingRoles,
+        prompt,
+        system: (role) => stage === 'opening'
+          ? `你是 AI 会议中的"${role.name}"。你的职责是${role.description}。你必须清楚区分事实、推测和价值判断，不要替用户做最终决定。`
+          : `你是 AI 会议中的"${role.name}"，职责是${role.description}。独立开场已经锁定，现在进入公开交叉质询：你能看到此前的完整会议记录，但看不到其他席位正在生成的本轮回答。请同时完成三件事：1. 直接回应主持人刚才的发言；2. 点名审阅至少一个其他议事席的具体观点，说明你支持、质疑或补充什么以及理由；3. 说明你的初始立场是否改变及原因。不要机械赞同，也不要为了反对而反对；不要替主持人下结论。控制在 300 字以内。`,
+      }
+    }
     setView(meeting.summary ? 'result' : 'meeting')
     setMobileNav(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -449,12 +649,17 @@ function App() {
     if (meeting) openSavedMeeting(meeting)
   }
 
-  function appendMeetingMessages(meetingId, addedMessages) {
-    if (!meetingId || !addedMessages?.length) return
+  function appendMeetingMessages(meetingId, addedMessages, statuses = null) {
+    if (!meetingId || (!addedMessages?.length && !statuses)) return
     setSavedMeetings((current) => {
       const next = current.map((meeting) =>
         meeting.id === meetingId
-          ? { ...meeting, updatedAt: new Date().toISOString(), messages: [...meeting.messages, ...addedMessages] }
+          ? {
+              ...meeting,
+              updatedAt: new Date().toISOString(),
+              messages: [...(Array.isArray(meeting.messages) ? meeting.messages : []), ...addedMessages],
+              ...(statuses ? { roleStatuses: { ...(meeting.roleStatuses || {}), ...statuses } } : {}),
+            }
           : meeting,
       )
       try {
@@ -479,8 +684,12 @@ function App() {
 
   function showNewMeeting() {
     setCurrentMeetingId(null)
+    currentMeetingRef.current = null
+    activeRunRef.current = null
+    lastBatchRef.current = null
     setRoleModels(loadSavedRoleModels())
     setMessages([])
+    setRoleStatuses({})
     setSummary('')
     setMeetingError('')
     setIsThinking(false)
@@ -492,31 +701,71 @@ function App() {
     const clean = content.trim()
     if (!clean || isThinking) return
     const meetingId = currentMeetingId
-    const userMessage = { type: 'user', stage: 'user', author: '你', content: clean }
+    const roundId = createMeetingId()
+    const userMessage = { type: 'user', stage: 'user', roundId, author: '你', content: clean }
     const nextMessages = [...messages, userMessage]
+    const transcript = transcriptText(nextMessages)
+    const batch = {
+      meetingId,
+      roundId,
+      stage: 'cross-examination',
+      roles: activeRoles.map((role) => ({ ...role })),
+      prompt: `原始议题：${form.topic}\n此前完整会议记录：\n${transcript}`,
+      system: (role) => `你是 AI 会议中的"${role.name}"，职责是${role.description}。独立开场已经锁定，现在进入公开交叉质询：你能看到此前的完整会议记录，但看不到其他席位正在生成的本轮回答。请同时完成三件事：1. 直接回应主持人刚才的发言；2. 点名审阅至少一个其他议事席的具体观点，说明你支持、质疑或补充什么以及理由；3. 说明你的初始立场是否改变及原因。不要机械赞同，也不要为了反对而反对；不要替主持人下结论。控制在 300 字以内。`,
+    }
     setMessages(nextMessages)
+    activeRunRef.current = batch
+    lastBatchRef.current = batch
+    setRoleStatuses(createRoleStatuses(batch.roles, roundId, 'pending'))
     setMeetingError('')
     setIsThinking(true)
     try {
-      const transcript = transcriptText(nextMessages)
-      const replies = await Promise.all(activeRoles.map(async (role) => ({
-        type: 'ai', stage: 'cross-examination', roleId: role.id, author: role.name, model: role.modelId,
-        content: await askRole(role, `你是 AI 会议中的"${role.name}"，职责是${role.description}。独立开场已经锁定，现在进入公开交叉质询：你能看到此前的完整会议记录，但看不到其他席位正在生成的本轮回答。请同时完成三件事：1. 直接回应主持人刚才的发言；2. 点名审阅至少一个其他议事席的具体观点，说明你支持、质疑或补充什么以及理由；3. 说明你的初始立场是否改变及原因。不要机械赞同，也不要为了反对而反对；不要替主持人下结论。控制在 300 字以内。`, `原始议题：${form.topic}\n此前完整会议记录：\n${transcript}`, apiConfig),
-      })))
-      if (currentMeetingRef.current === meetingId) {
+      const { messages: replies, statuses } = await runRoleBatch(batch)
+      if (isCurrentRun(meetingId, roundId)) {
+        setRoleStatuses(statuses)
         setMessages([...nextMessages, ...replies])
       } else {
-        appendMeetingMessages(meetingId, replies)
+        appendMeetingMessages(meetingId, replies, statuses)
       }
     } catch (error) {
-      if (currentMeetingRef.current === meetingId) setMeetingError(error.message)
+      if (isCurrentRun(meetingId, roundId)) setMeetingError(error.message)
     } finally {
-      if (currentMeetingRef.current === meetingId) setIsThinking(false)
+      if (isCurrentRun(meetingId, roundId)) setIsThinking(false)
+    }
+  }
+
+  async function retryRole(roleId) {
+    const batch = lastBatchRef.current
+    if (!batch || batch.meetingId !== currentMeetingId || isThinking) return
+    if (!getRoleStatusMeta(roleStatuses[roleId]?.status).retryable) return
+    const role = activeRoles.find((item) => item.id === roleId) || batch.roles.find((item) => item.id === roleId)
+    if (!role) return
+
+    const retryBatch = { ...batch, roles: [{ ...role }] }
+    activeRunRef.current = batch
+    setRoleStatuses((current) => ({
+      ...current,
+      [roleId]: { ...current[roleId], status: 'pending', model: role.modelId, error: '', roundId: batch.roundId },
+    }))
+    setMeetingError('')
+    setIsThinking(true)
+    try {
+      const { messages: replies, statuses } = await runRoleBatch(retryBatch)
+      if (isCurrentRun(batch.meetingId, batch.roundId)) {
+        setRoleStatuses((current) => ({ ...current, ...statuses }))
+        if (replies.length) setMessages((current) => [...current, ...replies])
+      } else {
+        appendMeetingMessages(batch.meetingId, replies, statuses)
+      }
+    } catch (error) {
+      if (isCurrentRun(batch.meetingId, batch.roundId)) setMeetingError(error.message)
+    } finally {
+      if (isCurrentRun(batch.meetingId, batch.roundId)) setIsThinking(false)
     }
   }
 
   async function finishMeeting() {
-    if (isThinking || messages.length < activeRoles.length + 1) return
+    if (isThinking || !messages.some((message) => message.type === 'user')) return
     setMeetingError('')
     setIsThinking(true)
     try {
@@ -605,11 +854,13 @@ function App() {
             form={form}
             roles={activeRoles}
             models={models}
+            roleStatuses={roleStatuses}
             messages={messages}
             isThinking={isThinking}
             error={meetingError}
             onModelChange={updateRoleModel}
             onSend={submitContribution}
+            onRetryRole={retryRole}
             onFinish={finishMeeting}
           />
         )}
@@ -732,7 +983,7 @@ function SetupView({ form, selected, updateField, toggleRole, startMeeting, apiS
   )
 }
 
-function InteractiveMeetingView({ form, roles: activeRoles, models, messages, isThinking, error, onModelChange, onSend, onFinish }) {
+function InteractiveMeetingView({ form, roles: activeRoles, models, roleStatuses, messages, isThinking, error, onModelChange, onSend, onRetryRole, onFinish }) {
   const [draft, setDraft] = useState('')
   const hasUserTurn = messages.some((message) => message.type === 'user')
 
@@ -778,7 +1029,7 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
                 </div>
             )
           })}
-            {isThinking && messages.length > 0 && <div className="replying-state"><LoaderCircle size={17} className="spin" /><span><strong>议事席正在回应</strong>同时交叉审阅其他观点</span></div>}
+            {isThinking && messages.length > 0 && <div className="replying-state"><LoaderCircle size={17} className="spin" /><span><strong>议事席正在回应</strong>本轮完成后统一公开</span></div>}
           </div>
 
           <section className="human-turn">
@@ -800,6 +1051,9 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
             <div className="host-member"><span>你</span><div><strong>会议主持人</strong><small>决定讨论方向</small></div><i /></div>
             {activeRoles.map((role) => {
               const Icon = role.icon
+              const roleStatus = roleStatuses[role.id] || { status: 'idle' }
+              const statusMeta = getRoleStatusMeta(roleStatus.status)
+              const StatusIcon = statusMeta.Icon
               return (
                 <div className="table-member" key={role.id}>
                   <span className="role-icon" style={{ '--role-color': role.color }}><Icon size={15} /></span>
@@ -815,7 +1069,28 @@ function InteractiveMeetingView({ form, roles: activeRoles, models, messages, is
                       {models.map((model) => <option key={model} value={model}>{model}</option>)}
                     </select>
                   </label>
-                  <i />
+                  <div className="table-member-state">
+                    <span
+                      className={`seat-status ${statusMeta.className}`}
+                      title={roleStatus.error || statusMeta.label}
+                      aria-live="polite"
+                    >
+                      <StatusIcon size={12} className={roleStatus.status === 'pending' ? 'spin' : ''} />
+                      <span>{statusMeta.label}</span>
+                    </span>
+                    {statusMeta.retryable && (
+                      <button
+                        className="retry-role-button"
+                        type="button"
+                        onClick={() => onRetryRole(role.id)}
+                        disabled={isThinking}
+                        aria-label={`重试${role.name}`}
+                        title={roleStatus.status === 'unavailable' ? '切换模型后重试该席位' : `重试${role.name}`}
+                      >
+                        <RotateCw size={11} /> 重试
+                      </button>
+                    )}
+                  </div>
                 </div>
               )
             })}
